@@ -11,3 +11,5 @@ coverage/
 *.key
 runtime/
 private/
+__pycache__/
+*.py[cod]

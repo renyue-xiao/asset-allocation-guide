@@ -1,0 +1,17 @@
+{
+  "name": "asset-allocation-guide",
+  "version": "1.0.0",
+  "description": "可解释的中文资产配置情景工具与有出处的资料问答",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs"
+  },
+  "license": "MIT"
+}
