@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      name="description"
+      content="从家庭底账、资金用途与风险边界出发，探索可解释的资产配置情景。附大卫翁资料研究助手与可核对出处。"
+    />
+    <meta name="theme-color" content="#0f4c81" />
+    <title>有度 · 资产配置工作台</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.mjs"></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">跳转到主要内容</a>
+    <div class="paper">
+      <header class="masthead">
+        <a class="brand" href="#" aria-label="有度首页"
+          ><span class="brand-mark">有度<span class="brand-dot">。</span></span
+          ><span class="brand-caption"
+            >资产配置工作台<br /><span>ALLOCATION WORKSPACE</span></span
+          ></a
+        >
+        <nav aria-label="主导航">
+          <button class="nav-link active" data-view="planner">配置工作台</button
+          ><button class="nav-link" data-view="assistant">
+            资料问答 <span>↗</span></button
+          ><button class="nav-link" id="open-help">使用说明</button>
+        </nav>
+        <div class="mast-status">
+          <span class="status-dot"></span
+          ><span id="service-status">正在连接</span>
+        </div>
+      </header>
+      <main id="main" tabindex="-1">
+        <section id="planner-view">
+          <section
+            class="workspace"
+            id="workspace"
+            aria-labelledby="workspace-title"
+          >
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">PERSONAL ALLOCATION</p>
+                <h1 id="workspace-title">家庭资产配置</h1>
+                <p class="workspace-lead">
+                  填写现状，查看资金安排，再调整情景。
+                </p>
+              </div>
+              <div class="workspace-tools">
+                <button class="text-button" id="import-button">导入规划</button
+                ><input
+                  id="import-file"
+                  type="file"
+                  accept="application/json,.json"
+                  hidden
+                /><button class="text-button" id="export-button">
+                  导出规划 ↗</button
+                ><button class="text-button" id="reset-button">清空</button>
+              </div>
+            </div>
+            <div class="sample-strip">
+              <span class="small">虚构样例</span>
+              <div id="sample-buttons"></div>
+              <span class="sample-label" id="sample-label"
+                >当前：我的空白规划</span
+              >
+            </div>
+            <div class="work-grid">
+              <div class="work-main">
+                <div class="stepper" id="stepper" aria-label="规划步骤"></div>
+                <div id="step-content"></div>
+              </div>
+              <aside class="planning-rail">
+                <div class="rail-title">
+                  <span class="eyebrow">AT A GLANCE</span
+                  ><span class="folio">01—04</span>
+                </div>
+                <h3>你的财务切片</h3>
+                <div id="live-summary"></div>
+                <form id="quick-question" class="quick-question">
+                  <label for="quick-input">有疑问，随时问</label
+                  ><textarea
+                    id="quick-input"
+                    rows="3"
+                    maxlength="1200"
+                    placeholder="例如：我的收入不稳定，应急资金怎么考虑？"
+                    required
+                  ></textarea
+                  ><button class="button" type="submit">询问资料助手 ↗</button>
+                </form>
+                <div class="rail-note">
+                  <p>金额在浏览器内计算。规划可导出到你的设备。</p>
+                  <p>
+                    问答会将问题及相关原文片段发送至
+                    DeepSeek；家庭底账只在你主动写入问题时才会随之发送。
+                  </p>
+                </div>
+              </aside>
+            </div>
+          </section>
+        </section>
+        <section
+          id="assistant-view"
+          class="view-panel"
+          hidden
+          aria-labelledby="assistant-title"
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">RESEARCH ASSISTANT</p>
+              <h1 id="assistant-title">资产配置问答</h1>
+              <p class="section-lead">
+                结合大卫翁书籍与起朱楼资料，回答配置中的具体问题。
+              </p>
+            </div>
+            <span class="mode-badge" id="assistant-status">来源检索</span>
+          </div>
+          <div class="assistant-grid">
+            <div class="chat-main">
+              <div class="assistant-disclosure">
+                基于大卫翁资料的 AI
+                研究助手，由独立开发者制作。引用可展开核对，回答中的软件推演另行标注。
+              </div>
+              <div class="prompt-suggestions">
+                <button data-ask="职业收入不稳定，应该怎样考虑资产配置？">
+                  收入不稳定，怎么安排？ ↗</button
+                ><button data-ask="为什么短期要用的钱不适合放在权益资产？">
+                  两年后要用的钱放哪里？ ↗</button
+                ><button data-ask="大卫翁怎样理解风险承受能力？">
+                  能承受多大的风险？ ↗</button
+                ><button data-ask="应该如何制定再平衡和投资纪律？">
+                  什么时候需要再平衡？ ↗
+                </button>
+              </div>
+              <div id="chat-messages" aria-live="polite">
+                <div class="chat-welcome">
+                  <span class="large-index">Q.</span>
+                  <h2>今天想解决什么配置问题？</h2>
+                  <p>
+                    可以输入你的困惑，或选择上方问题。<br />支持继续追问，回答附原文出处。
+                  </p>
+                </div>
+              </div>
+              <form id="chat-form">
+                <label for="chat-input" class="sr-only">向资料助手提问</label
+                ><textarea
+                  id="chat-input"
+                  maxlength="1200"
+                  rows="3"
+                  placeholder="例如：工资与持仓都和同一个行业相关，应该注意什么？"
+                  required
+                ></textarea>
+                <div class="chat-form-bottom">
+                  <span class="small">请勿填写账户、身份或其他敏感信息。</span
+                  ><button
+                    class="button primary"
+                    type="submit"
+                    id="send-question"
+                  >
+                    查阅并回答 <span>↑</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+            <aside class="source-rail">
+              <p class="eyebrow">SESSION</p>
+              <h3>本次问答</h3>
+              <p id="coverage-note">正在连接知识库…</p>
+              <div class="reading-index">
+                <span>提问建议</span>
+                <p>说清资金用途和最早用款时间，区分现金压力与投资波动。</p>
+                <span>继续追问</span>
+                <p>可以进一步询问原因、适用条件，或请助手解释某一段来源。</p>
+              </div>
+              <button class="text-button" data-view="planner">
+                回到配置工作台 →</button
+              ><button class="text-button" id="clear-chat">清空本次问答</button>
+            </aside>
+          </div>
+        </section>
+      </main>
+      <footer>
+        <span class="footer-brand">有度。</span>
+        <p>基于《资产配置行动指南》与起朱楼资料</p>
+        <span class="footer-meta"
+          >独立研究工具 · 教育与情景分析<br />© 2026 ·
+          规划数据保存在本次页面会话</span
+        >
+      </footer>
+    </div>
+    <div id="toast" role="status" hidden></div>
+    <dialog id="source-dialog">
+      <div class="dialog-top">
+        <span class="eyebrow">SOURCE NOTE</span
+        ><button class="icon-button" id="close-source" aria-label="关闭来源">
+          ×
+        </button>
+      </div>
+      <div id="source-dialog-content"></div>
+    </dialog>
+    <dialog id="help-dialog">
+      <div class="dialog-top">
+        <span class="eyebrow">使用说明</span
+        ><button class="icon-button" id="close-help" aria-label="关闭说明">
+          ×
+        </button>
+      </div>
+      <h2>如何使用这份工作台</h2>
+      <p>
+        依次填写家庭底账、资金目标与风险边界，在最后一步比较配置情景。虚构样例可直接体验完整流程。
+      </p>
+      <p>
+        金额使用人民币元；支出不含月供。应急、短期用途和额外到期本金先预留，剩余资金才进入组合比较。房产与锁定资产单独记录。
+      </p>
+      <p>
+        配比、36
+        个月目标分界和压力跌幅是软件示例，可查看计算口径。结果用于教育和情景复核；具体产品的费用、到账及风险条款需另行核对。
+      </p>
+      <p>
+        资料助手根据大卫翁及起朱楼材料回答，属于独立 AI
+        工具，不代表作者本人或授权服务。问题和检索到的少量原文会发送给配置的模型。
+      </p>
+      <p>
+        离开页面前可导出规划，文件包含你填写的数据。重新导入后请核对时点；本页不自动保存家庭资料。
+      </p>
+      <p>
+        一般配置框架参考
+        <a
+          href="https://www.investor.gov/introduction-investing/getting-started/asset-allocation"
+          target="_blank"
+          rel="noreferrer"
+          >SEC 投资者教育</a
+        >；大卫翁观点以回答中的具体出处为准。
+      </p>
+    </dialog>
+  </body>
+</html>
