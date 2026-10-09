@@ -33,6 +33,8 @@ await assistant.ask({
 
 `ask` 返回 `{mode, answer, sections, sources, limitations, retrieval, modelStatus}`。`mode` 为 `model`、`retrieval` 或 `insufficient`。`sections` 每段包含 `label`、`text`、`sourceIds` 和可选的 `evidence` 支持摘句。`sources` 包含来源信息与本次使用的 `evidenceSentences`。
 
+关联资料额外保留 `provenance`、`quality`、`membership`；正式文字稿保留来源实际记录的版次和节目身份字段。这些信息随证据交给模型，并在返回的来源卡中保留。段落归属只采用已确认的说话人，文档作者显示在出处信息中。当前引文按回答段落关联：明确归因给某位作者的段落，所有支持片段须归属一致；星主评论与第三方正文分别成段取证。
+
 页面应使用 `textContent` 或框架默认转义呈现这些普通字符串。公共链接仅保留 HTTP(S)，新窗口链接应设置 `rel="noopener noreferrer"`。
 
 ## 解释计算情景

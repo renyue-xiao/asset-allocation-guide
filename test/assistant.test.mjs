@@ -51,6 +51,100 @@ const provider = (generate) => ({
   }),
   generate,
 });
+
+const referenceSource = {
+  ...sources[0],
+  id: "ref-synthetic:1",
+  kind: "reference_article",
+  title: "合成关联文章：应急资金",
+  author: "第三方作者",
+  speaker: "第三方作者",
+  summary: "应急资金应结合家庭收支安排。短期支出需要保持现金可用。",
+  provenance: { corpus: "qizhulou", parentDocId: "zs-synthetic-parent", parentAuthor: "大卫翁", parentUrl: "https://example.invalid/parent", referenceKind: "linked_article", author: "第三方作者", publisher: "合成机构" },
+  quality: { method: "html", complete: true, reviewed: true },
+  membership: "member",
+  attribution: "父帖引用的第三方文章，引用不表示赞同。",
+};
+
+test("mixed citations cannot license an explicit author claim in any paragraph type", async () => {
+  for (const label of ["来源观点", "软件推演", "模型补充"]) {
+    const result = await createResearchAssistant({
+      sources: [{ ...sources[0], speaker: "大卫翁" }, referenceSource],
+      provider: provider(async () => ({ sections: [{
+        label, text: "大卫翁认为应急资金与家庭收支、长期投资需要统一核对。",
+        sourceIds: ["cash", referenceSource.id], evidence: [
+          { sourceId: "cash", quote: "应急资金应与长期投资分开。" },
+          { sourceId: referenceSource.id, quote: "应急资金应结合家庭收支安排。" },
+        ],
+      }], limitations: [] })),
+    }).ask({ question: "应急资金怎么安排？" });
+    assert.equal(result.mode, "retrieval");
+    assert.equal(result.modelStatus.answerValidation, "rejected");
+    assert.doesNotMatch(result.answer, /大卫翁认为/);
+  }
+});
+
+test("separate first-party and reference author claims retain their own metadata", async () => {
+  let received;
+  const result = await createResearchAssistant({
+    sources: [{ ...sources[0], speaker: "大卫翁" }, referenceSource],
+    provider: provider(async ({ input }) => {
+      received = input;
+      return { sections: [
+        { label: "来源观点", text: "大卫翁认为应急资金应与长期投资分开。", sourceIds: ["cash"], evidence: [{ sourceId: "cash", quote: "应急资金应与长期投资分开。" }] },
+        { label: "来源观点", text: "第三方作者认为应急资金应结合家庭收支安排。", sourceIds: [referenceSource.id], evidence: [{ sourceId: referenceSource.id, quote: "应急资金应结合家庭收支安排。" }] },
+      ], limitations: [] };
+    }),
+  }).ask({ question: "应急资金怎么安排？" });
+  assert.equal(result.mode, "model");
+  assert.equal(result.modelStatus.answerValidation, "passed");
+  const evidence = received.evidence.find((item) => item.sourceId === referenceSource.id);
+  assert.equal(evidence.provenance.parentDocId, "zs-synthetic-parent");
+  assert.equal(evidence.quality.reviewed, true);
+  const card = result.sources.find((item) => item.id === referenceSource.id);
+  assert.equal(card.membership, "member");
+  assert.equal(card.provenance.author, "第三方作者");
+});
+
+test("reference quality and landing pages cannot reach model or fallback", async () => {
+  for (const blocked of [
+    { ...referenceSource, quality: { method: "html", complete: false, reviewed: true } },
+    { ...referenceSource, contentRole: "landing_page" },
+    { ...referenceSource, kind: "reference_image", provenance: { ...referenceSource.provenance, referenceKind: "image_ocr" }, quality: { method: "ocr", complete: true, reviewed: false }, summary: "图片识别现金配置比例为35%，收入下降时保持现金备用。" },
+  ]) {
+    let calls = 0;
+    for (const configured of [false, true]) {
+      const result = await createResearchAssistant({ sources: [blocked], ...(configured ? { provider: provider(async () => { calls++; return validSelection; }) } : {}) }).ask({ question: "应急资金怎么安排？" });
+      assert.equal(result.mode, "insufficient");
+      assert.equal(result.sources.length, 0);
+      assert.doesNotMatch(result.answer, /35%/);
+    }
+    assert.equal(calls, 0);
+  }
+});
+
+test("publication author stays in citation information when segment speaker is unknown", async () => {
+  const article = { ...referenceSource, author: "记者甲", publicationAuthor: "记者甲", speaker: null };
+  const result = await createResearchAssistant({ sources: [article] }).ask({ question: "应急资金怎么安排？" });
+  assert.equal(result.sections[0].label, "来源摘述");
+  assert.equal(result.sources[0].author, "记者甲");
+  assert.equal(result.sources[0].publicationAuthor, "记者甲");
+  assert.doesNotMatch(result.sections[0].label, /记者甲/);
+});
+
+test("source relations and official transcript edition fields survive cards and evidence", async () => {
+  let received;
+  const article = { ...referenceSource, provenance: { ...referenceSource.provenance, sourceRelations: [
+    { parentDocId: "zs-synthetic-parent", parentAuthor: "大卫翁", parentUrl: "https://example.invalid/first", parentPublishedAt: "2026-01-01", part: "附图" },
+    { parentDocId: "wx-synthetic-parent", parentAuthor: "大卫翁", parentUrl: "https://example.invalid/second", parentPublishedAt: "2026-01-02", part: "引用" },
+  ] } };
+  const official = { ...sources[0], kind: "podcast", contentRole: "transcript", edition: "official_text", episodeDocId: "ep-synthetic", episodePublishedAt: "2026-01-01" };
+  const result = await createResearchAssistant({ sources: [article, official], provider: provider(async ({ input }) => { received=input; return validSelection; }) }).ask({ question: "应急资金怎么安排？" });
+  assert.equal(result.mode, "model");
+  assert.equal(received.evidence.find((item) => item.sourceId===article.id).provenance.sourceRelations.length, 2);
+  assert.equal(received.evidence.find((item) => item.sourceId==="cash").edition, "official_text");
+  assert.equal(result.sources.find((item) => item.id==="cash").episodePublishedAt, "2026-01-01");
+});
 const validSelection = {
   sections: [
     {
@@ -146,7 +240,7 @@ test("named speaker questions cannot silently use a different person; unknown sp
     "guest",
   );
   const result = await assistant.ask({ question: "再平衡怎么做？" });
-  assert.match(result.sections[0].label, /具体发言人未确认/);
+  assert.equal(result.sections[0].label, "来源摘述");
   assert.doesNotMatch(result.sections[0].label, /大卫翁/);
 });
 
@@ -435,7 +529,7 @@ test("an article with unknown speaker never falls back to its author as speaker"
   const result = await createResearchAssistant({ sources: [source] }).ask({
     question: "应急储备如何安排？",
   });
-  assert.match(result.sections[0].label, /具体发言人未确认/);
+  assert.equal(result.sections[0].label, "来源摘述");
   assert.doesNotMatch(result.sections[0].label, /大卫翁/);
 });
 

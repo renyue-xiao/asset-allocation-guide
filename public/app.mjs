@@ -632,11 +632,26 @@ async function importPlan(file) {
   }
 }
 function sourceDetail(source) {
-  const link =
-    source.publicUrl && /^https?:\/\//.test(source.publicUrl)
-      ? `<p style="margin-top:18px"><a href="${esc(source.publicUrl)}" target="_blank" rel="noreferrer">打开来源页面 ↗</a></p>`
+  const sourceLink = (url, label) =>
+    typeof url === "string" && /^https?:\/\//.test(url)
+      ? `<a href="${esc(url)}" target="_blank" rel="noreferrer">${esc(label)} ↗</a>`
       : "";
-  return `<h2>${esc(source.title)}</h2><p class="source-meta">${esc(kinds[source.kind] || source.kind)} · ${esc(source.date || "日期未记录")}<br>作者：${esc(source.author || "未标注")} · 发言归属：${esc(source.speaker || "未确认")}</p>${(source.evidenceSentences || []).map((text) => `<blockquote class="source-excerpt">${esc(text)}</blockquote>`).join("")}<details class="source-context"><summary>查看相邻上下文</summary><p>${esc(source.summary)}</p></details><div class="source-locator">${esc(source.docId)} · ${esc(source.anchor)}</div><p class="small" style="margin-top:14px">归属说明：${esc(source.attribution)}<br>证据边界：${esc(source.evidenceLimitations)}</p>${link}<p class="small" style="margin-top:18px">检索片段仅覆盖本次问题相关上下文。完整语境请按定位回查原资料。</p>`;
+  const link =
+    source.publicUrl
+      ? `<p style="margin-top:18px">${sourceLink(source.publicUrl, "打开原资料")}</p>`
+      : "";
+  const provenance = source.provenance;
+  const parentLinks = [...new Map((provenance?.sourceRelations || [{ parentDocId: provenance?.parentDocId, parentUrl: provenance?.parentUrl }])
+    .filter((relation) => relation?.parentDocId)
+    .map((relation) => [relation.parentDocId, relation])).values()].slice(0, 3)
+    .map((relation) => sourceLink(relation.parentUrl, `父帖 ${relation.parentDocId}`)).filter(Boolean).join(" · ");
+  const relationInfo = provenance
+    ? `<p class="small">关联资料 · ${provenance.referenceKind === "image_ocr" ? "图片识别文本" : "引用正文"}<br>提取：${esc(source.quality?.method || "未记录")} · ${source.quality?.complete ? "正文完整" : "正文不完整"} · ${source.quality?.reviewed ? "已复核" : "待复核"}${parentLinks ? `<br>${parentLinks}` : ""}</p>`
+    : "";
+  const editionInfo = source.edition === "official_text"
+    ? `<p class="small">星球正式文字稿${source.episodeDocId ? ` · ${esc(source.episodeDocId)}` : ""}${source.episodePublishedAt ? ` · 节目日期 ${esc(source.episodePublishedAt)}` : ""}</p>`
+    : "";
+  return `<h2>${esc(source.title)}</h2><p class="source-meta">${esc(({ reference_article: "引用正文", reference_image: "图片识别文本" })[source.kind] || kinds[source.kind] || source.kind)} · ${esc(source.date || "日期未记录")}<br>作者：${esc(source.publicationAuthor || source.author || "未标注")} · 发言归属：${esc(source.speaker || "未确认")}</p>${relationInfo}${editionInfo}${(source.evidenceSentences || []).map((text) => `<blockquote class="source-excerpt">${esc(text)}</blockquote>`).join("")}<details class="source-context"><summary>查看相邻上下文</summary><p>${esc(source.summary)}</p></details><div class="source-locator">${esc(source.docId)} · ${esc(source.anchor)}</div><p class="small" style="margin-top:14px">归属说明：${esc(source.attribution)}<br>证据边界：${esc(source.evidenceLimitations)}</p>${link}<p class="small" style="margin-top:18px">检索片段仅覆盖本次问题相关上下文。完整语境请按定位回查原资料。</p>`;
 }
 function showSource(id, turn) {
   const source = (

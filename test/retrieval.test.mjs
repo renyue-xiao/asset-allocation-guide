@@ -32,6 +32,100 @@ test("retrieval worker does not inherit model keys and keeps cache HOME unchange
     assert.equal(result[name], undefined);
 });
 
+test("references require an eligible first-party parent and never inherit its speaker", () => {
+  const scriptPath = fileURLToPath(new URL("../scripts/retrieve.py", import.meta.url));
+  const program = String.raw`
+import importlib.util,json,sqlite3,tempfile,pathlib,sys
+spec=importlib.util.spec_from_file_location('retrieval',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+with tempfile.TemporaryDirectory() as temp:
+ db=pathlib.Path(temp)/'test.sqlite';c=sqlite3.connect(db)
+ c.executescript('CREATE TABLE docs(doc_id TEXT,source TEXT,title TEXT,published_at TEXT,url TEXT,extra TEXT);CREATE TABLE segments(seg_id TEXT,doc_id TEXT,n INTEGER,text TEXT,anchor TEXT,speaker TEXT,start_ms INTEGER);')
+ def doc(did,source,extra):
+  c.execute('INSERT INTO docs VALUES(?,?,?,?,?,?)',(did,source,'合成资料：应急资金',None,'https://example.invalid/item',json.dumps(extra)))
+ doc('zs-parent','zsxq',{'作者':'大卫翁'})
+ doc('zs-qa-parent','zsxq',{'作者':'提问人','回答者':'大卫翁'})
+ doc('wx-parent','wx',{'作者':'大卫翁'})
+ doc('zs-reader','zsxq',{'作者':'读者甲'})
+ valid={'corpus':'qizhulou','parentDocId':'zs-parent','parentAuthor':'大卫翁','referenceKind':'linked_article','author':'第三方作者','publisher':'合成发布者','date':'2026-01-01','quality':{'method':'html','complete':True,'reviewed':True},'membership':'member'}
+ doc('ref-article','reference',valid)
+ doc('ref-qa','reference',{**valid,'parentDocId':'zs-qa-parent'})
+ doc('ref-wx','reference',{**valid,'parentDocId':'wx-parent'})
+ doc('ref-image','reference',{**valid,'author':None,'referenceKind':'image_ocr','quality':{'method':'ocr','complete':True,'reviewed':False}})
+ doc('ref-empty','reference',valid)
+ doc('ref-incomplete','reference',{**valid,'quality':{'complete':False,'reviewed':True}})
+ doc('ref-landing','reference',{**valid,'contentRole':'landing_page'})
+ doc('ref-explicit','reference',valid)
+ doc('ref-image-reviewed','reference',{**valid,'referenceKind':'image_ocr'})
+ for name,change in [('absent',{'parentDocId':'zs-missing'}),('reader',{'parentDocId':'zs-reader'}),('nested',{'parentDocId':'ref-article'}),('corpus',{'corpus':'other'}),('author',{'parentAuthor':'其他人'}),('kind',{'referenceKind':'unknown'})]:doc('ref-bad-'+name,'reference',{**valid,**change})
+ doc('ref-malformed','reference',[])
+ valid['sourceRelations']=[{'parentDocId':'zs-parent','parentAuthor':'大卫翁','part':'图1'},{'parentDocId':'wx-parent','parentAuthor':'大卫翁','part':'引文'},{'parentDocId':'zs-reader','parentAuthor':'大卫翁'}]
+ c.execute('UPDATE docs SET extra=? WHERE doc_id=?',(json.dumps(valid),'ref-article'))
+ body='【回答】大卫翁：我是大卫翁。应急资金与现金流、家庭支出和长期目标应当分别核对，这是第三方合成测试正文。'
+ for did in ['ref-article','ref-image','ref-qa','ref-wx','ref-incomplete','ref-landing','ref-explicit','ref-image-reviewed']:
+  c.execute('INSERT INTO segments VALUES(?,?,?,?,?,?,?)',(did+':1',did,1,body,'第1段','大卫翁',None))
+ c.execute('UPDATE segments SET speaker=? WHERE doc_id=?',('受访者甲','ref-explicit'))
+ c.execute('UPDATE segments SET speaker=NULL WHERE doc_id=?',('ref-image-reviewed',))
+ c.execute('INSERT INTO segments VALUES(?,?,?,?,?,?,?)',('ref-empty:1','ref-empty',1,'[图片 1 张：见私有采集目录]','第1段',None,None))
+ c.commit();c.close();r=m.Retriever(temp,str(db),'keyword')
+ assert {'ref-article','ref-qa','ref-wx','ref-image','ref-empty'}<=r.docs.keys()
+ assert not any(did.startswith('ref-bad-') or did=='ref-malformed' for did in r.docs)
+ class Stub:
+  def __init__(self):self.doc_segments={did:[dict(x) for x in r.conn.execute('SELECT * FROM segments WHERE doc_id=? ORDER BY n',(did,))] for did in r.docs}
+  def get_context(self,sid,radius=1):
+   did,n=sid.rsplit(':',1)
+   return {'segments':[{'segmentId':x['seg_id'],'text':x['text'],'anchor':x['anchor'],'isMatch':x['n']==int(n)} for x in self.doc_segments[did]]}
+ r.searcher=Stub();r.rows={x['seg_id']:x for segs in r.searcher.doc_segments.values() for x in segs}
+ article=r.context('ref-article:1');assert article['speaker'] is None and article['author']=='第三方作者'
+ assert article['kind']=='reference_article' and article['provenance']['parentDocId']=='zs-parent'
+ assert article['quality']=={'method':'html','complete':True,'reviewed':True} and article['membership']=='member'
+ assert r.context('ref-image:1') is None
+ assert r.context('ref-incomplete:1') is None and r.context('ref-landing:1') is None
+ assert r.context('ref-explicit:1')['speaker']=='受访者甲'
+ image=r.context('ref-image-reviewed:1');assert image['speaker'] is None
+ assert image['kind']=='reference_image' and '已核对原图' in image['evidenceLimitations']
+ assert {x['parentDocId'] for x in article['provenance']['sourceRelations']}=={'zs-parent','wx-parent'}
+ assert r.context('ref-empty:1') is None
+ assert r.context('ref-qa:1')['speaker'] is None
+ print('ok')
+`;
+  assert.equal(execFileSync(process.env.QIZHULOU_PYTHON || process.env.PYTHON || "python3", ["-c", program, scriptPath], {
+    encoding: "utf8", timeout: 10000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  }).trim(), "ok");
+});
+
+test("official transcript candidates replace same-episode ASR without changing direct old context", () => {
+  const scriptPath = fileURLToPath(new URL("../scripts/retrieve.py", import.meta.url));
+  const program = String.raw`
+import importlib.util,json,sqlite3,tempfile,pathlib,sys
+spec=importlib.util.spec_from_file_location('retrieval',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+with tempfile.TemporaryDirectory() as temp:
+ db=pathlib.Path(temp)/'test.sqlite';c=sqlite3.connect(db)
+ c.executescript('CREATE TABLE docs(doc_id TEXT,source TEXT,title TEXT,published_at TEXT,url TEXT,extra TEXT);CREATE TABLE segments(seg_id TEXT,doc_id TEXT,n INTEGER,text TEXT,anchor TEXT,speaker TEXT,start_ms INTEGER);')
+ docs=[('tr-100','transcript',{'播客':'起朱楼宴宾客'}),('zs-formal','zsxq',{'作者':'大卫翁','contentRole':'transcript','edition':'official_text','episodeDocId':'ep-100','episodePublishedAt':'2026-01-01'})]
+ for did,source,extra in docs:
+  c.execute('INSERT INTO docs VALUES(?,?,?,?,?,?)',(did,source,'合成正式稿或转写',None,None,json.dumps(extra)))
+  text='应急现金流需要记录家庭支出，收入中断期间的现金储备必须单独核对，不应使用长期目标资金支付当前支出。'+('异文。' if source=='transcript' else '正式稿。')
+  c.execute('INSERT INTO segments VALUES(?,?,?,?,?,?,?)',(did+':1',did,1,text,'第1段','大卫翁',None))
+ c.commit();c.close();r=m.Retriever(temp,str(db),'keyword')
+ class Stub:
+  def __init__(self):self.doc_segments={did:[dict(x) for x in r.conn.execute('SELECT * FROM segments WHERE doc_id=? ORDER BY n',(did,))] for did in r.docs}
+  def get_context(self,sid,radius=1):
+   did,n=sid.rsplit(':',1)
+   return {'segments':[{'segmentId':x['seg_id'],'text':x['text'],'anchor':x['anchor'],'isMatch':x['n']==int(n)} for x in self.doc_segments[did]]}
+ r.searcher=Stub();r.rows={x['seg_id']:x for segs in r.searcher.doc_segments.values() for x in segs};r.initialize=lambda:None;r.coverage={'vectorAvailable':False}
+ r.lexical=lambda q: [('tr-100:1',50)] if '异文' in q else [('tr-100:1',50),('zs-formal:1',40)]
+ result=r.search('应急现金流怎么安排？',mode='bm25')
+ assert [s['docId'] for s in result['sources']]==['zs-formal']
+ formal=result['sources'][0];assert formal['kind']=='podcast' and formal['speaker']=='大卫翁'
+ assert formal['edition']=='official_text' and formal['episodeDocId']=='ep-100' and formal['episodePublishedAt']=='2026-01-01'
+ assert formal['date'] is None and '星球正式文字稿' in formal['evidenceLimitations'] and 'ASR' not in formal['evidenceLimitations']
+ old=r.context('tr-100:1');assert old['speaker']=='大卫翁' and 'ASR' in old['evidenceLimitations'] and 'edition' not in old
+ only=r.search('应急现金流异文怎么解释？',mode='bm25');assert [s['docId'] for s in only['sources']]==['tr-100'] and 'edition' not in only['sources'][0]
+ print('ok')
+`;
+  assert.equal(execFileSync(process.env.QIZHULOU_PYTHON || process.env.PYTHON || "python3", ["-c", program, scriptPath], { encoding: "utf8", timeout: 10000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } }).trim(), "ok");
+});
+
 test("missing corpus is explicit and does not start a model or download", async () => {
   const retriever = createRetriever({ root: "", db: "" });
   assert.equal(retriever.status().configured, false);
