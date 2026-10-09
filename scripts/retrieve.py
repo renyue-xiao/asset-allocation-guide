@@ -16,6 +16,7 @@ import re
 import sqlite3
 import sys
 import time
+from urllib.parse import urlsplit, parse_qsl
 
 TOPICS = [
     (r'应急|备用|活钱|断粮|失业|丢.{0,3}工作|饭碗|收入中断|安全垫|储备', '应急 现金 储备 收入中断 流动性', r'应急|备用|储备|现金|流动性|失业'),
@@ -55,22 +56,137 @@ def turn_labels(text, doc_id):
     return sorted(labels, key=lambda item: item.start())
 
 
+def reference_parent(extra, docs):
+    """Membership is a verified parent relationship, not source authorship."""
+    parent_id = extra.get('parentDocId')
+    parent = docs.get(parent_id) if isinstance(parent_id, str) else None
+    if (extra.get('corpus') != 'qizhulou' or extra.get('parentAuthor') != '大卫翁'
+            or extra.get('referenceKind') not in {'linked_article', 'image_ocr'}
+            or not parent or parent['source'] not in {'zsxq', 'wx'}):
+        return None
+    parent_extra = parent['_extra']
+    prefix = 'zs-' if parent['source'] == 'zsxq' else 'wx-'
+    if (not parent_id.startswith(prefix)
+            or (parent_extra.get('作者') != '大卫翁' and parent_extra.get('回答者') != '大卫翁')):
+        return None
+    return parent
+
+
+def bounded_text(value, limit=300):
+    return value.strip()[:limit] if isinstance(value, str) else None
+
+
+def safe_url(value):
+    value = bounded_text(value, 2000)
+    try:
+        url = urlsplit(value or '')
+        if (url.scheme not in {'https', 'http'} or not url.netloc or url.username or url.password
+                or any(re.search(r'token|secret|signature|password|credential', name, re.I)
+                       for name, _ in parse_qsl(url.query))):
+            return None
+        return value
+    except ValueError:
+        return None
+
+
+def edition_metadata(extra):
+    return {key: bounded_text(extra.get(key), 160) for key in
+            ('contentRole', 'edition', 'episodeDocId', 'episodePublishedAt') if isinstance(extra.get(key), str)}
+
+
+def official_text(doc):
+    return (doc['source'] in {'zsxq', 'wx', 'transcript'}
+            and doc['_extra'].get('contentRole') == 'transcript'
+            and doc['_extra'].get('edition') == 'official_text')
+
+
+def episode_key(doc):
+    key = bounded_text(doc['_extra'].get('episodeDocId'), 160)
+    if key:
+        return key
+    # Legacy numeric IDs have an explicit canonical ep-/tr- identity convention.
+    if doc['source'] == 'transcript' and re.fullmatch(r'tr-\d+', doc['doc_id']):
+        return 'ep-' + doc['doc_id'][3:]
+    return None
+
+
+def reference_metadata(doc, parent, docs):
+    extra = doc['_extra']
+    quality = extra.get('quality')
+    quality = quality if isinstance(quality, dict) else {}
+    relations, seen = [], set()
+    supplied = extra.get('sourceRelations')
+    supplied = supplied if isinstance(supplied, list) else []
+    for relation in [*supplied[:64], {'parentDocId': parent['doc_id'], 'parentAuthor': '大卫翁'}]:
+        if not isinstance(relation, dict):
+            continue
+        candidate = reference_parent({**extra, 'parentDocId': relation.get('parentDocId'),
+                                      'parentAuthor': relation.get('parentAuthor')}, docs)
+        if not candidate:
+            continue
+        part = bounded_text(relation.get('part'), 120)
+        key = (candidate['doc_id'], part)
+        if part is None and any(item['parentDocId'] == candidate['doc_id'] for item in relations):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        relations.append({'parentDocId': candidate['doc_id'][:160], 'parentAuthor': '大卫翁',
+                          'parentUrl': safe_url(candidate.get('url')),
+                          'parentPublishedAt': bounded_text(candidate.get('published_at'), 32), 'part': part})
+    return {
+        'provenance': {'corpus': 'qizhulou', 'parentDocId': parent['doc_id'][:160],
+                       'parentAuthor': '大卫翁', 'parentUrl': safe_url(parent.get('url')),
+                       'referenceKind': extra['referenceKind'], 'sourceRelations': relations,
+                       'date': bounded_text(doc.get('published_at') or extra.get('date'), 32),
+                       'url': safe_url(doc.get('url') or extra.get('url')),
+                       'author': bounded_text(extra.get('author')),
+                       'publisher': bounded_text(extra.get('publisher'))},
+        'publicationAuthor': bounded_text(extra.get('publicationAuthor') or extra.get('author')),
+        'quality': {'method': bounded_text(quality.get('method'), 80) or '',
+                    'complete': quality.get('complete') is True,
+                    'reviewed': quality.get('reviewed') is True},
+        'membership': bounded_text(extra.get('membership'), 80) or 'qizhulou-related',
+        **edition_metadata(extra),
+    }
+
+
+def reference_answer_eligible(doc):
+    if doc['source'] != 'reference':
+        return True
+    metadata = doc['_reference']
+    return (metadata['quality']['complete'] and metadata.get('contentRole') != 'landing_page'
+            and (metadata['provenance']['referenceKind'] != 'image_ocr' or metadata['quality']['reviewed']))
+
+
 def select_docs(conn):
     """Same corpus=qizhulou predicate as the existing MCP server."""
-    docs = {}
+    docs, references = {}, []
     for row in conn.execute('SELECT * FROM docs'):
         d = dict(row)
         try:
             extra = json.loads(d.get('extra') or '{}')
         except (ValueError, TypeError):
             extra = {}
+        if not isinstance(extra, dict):
+            extra = {}
+        d['_extra'] = extra
+        if d['source'] == 'reference':
+            references.append(d)
+            continue
         if d['source'] not in {'book', 'wx', 'episode', 'transcript', 'zsxq'}:
             continue
         if d['source'] in {'episode', 'transcript'}:
             if extra.get('播客') != '起朱楼宴宾客' and not (extra.get('播客') is None and re.fullmatch(r'(?:ep|tr)-\d+', d['doc_id'])):
                 continue
-        d['_extra'] = extra
         docs[d['doc_id']] = d
+    for d in references:
+        parent = reference_parent(d['_extra'], docs)
+        if parent:
+            d['_reference'] = reference_metadata(d, parent, docs)
+            d['published_at'] = d.get('published_at') or d['_reference']['provenance']['date']
+            d['url'] = d.get('url') or d['_reference']['provenance']['url']
+            docs[d['doc_id']] = d
     return docs
 
 
@@ -141,6 +257,8 @@ class Retriever:
             if self.docs[did]['source'] == 'episode' or did.startswith('bookref-'):
                 continue
             body = seg['text'].strip()
+            if not reference_answer_eligible(self.docs[did]) or (self.docs[did]['source'] == 'reference' and body.startswith('[图片 ')):
+                continue
             if len(body) < 35 or body.startswith(('【提问】', '> 长文章', '来自：', '延伸阅读', '推荐理由')):
                 continue
             self.eligible_indices.append(i)
@@ -247,6 +365,7 @@ class Retriever:
             for rank, sid in enumerate(self.guided(question, groups)):
                 fused[sid] = fused.get(sid, 0.0) + (0.060 - rank * 0.004)
         ranked = sorted(fused, key=fused.get, reverse=True)
+        qualified = []
         sources, seen_docs, seen_text = [], set(), set()
         named_speakers = set(SPEAKERS.findall(question)) - {'大卫翁'}
         guided_ids = set(self.guided(question, groups)) if mode != 'bm25' else set()
@@ -262,11 +381,21 @@ class Retriever:
             if semantic and sem < 0.40 and sid not in dict(raw[:25]) and sid not in guided_ids:
                 continue
             did = seg['doc_id']
-            fingerprint = hashlib.sha256(re.sub(r'\s+', '', body).encode()).hexdigest()
-            if did in seen_docs or fingerprint in seen_text:
-                continue
             source = self.context(sid, question)
             if not source or (named_speakers and source['speaker'] not in named_speakers):
+                continue
+            qualified.append((sid, source))
+        official_episodes = {episode_key(self.docs[self.rows[sid]['doc_id']]) for sid, _ in qualified
+                             if official_text(self.docs[self.rows[sid]['doc_id']])}
+        official_episodes.discard(None)
+        for sid, source in qualified:
+            seg = self.rows[sid]
+            did = seg['doc_id']
+            if (self.docs[did]['source'] == 'transcript' and not official_text(self.docs[did])
+                    and episode_key(self.docs[did]) in official_episodes):
+                continue
+            fingerprint = hashlib.sha256(re.sub(r'\s+', '', seg['text']).encode()).hexdigest()
+            if did in seen_docs or fingerprint in seen_text:
                 continue
             sources.append(source)
             seen_docs.add(did)
@@ -282,6 +411,8 @@ class Retriever:
     def context(self, sid, question=''):
         hit = self.rows[sid]
         d = self.docs[hit['doc_id']]
+        if not reference_answer_eligible(d) or (d['source'] == 'reference' and (len(hit['text'].strip()) < 35 or hit['text'].strip().startswith('[图片 '))):
+            return None
         raw = self.searcher.get_context(sid, radius=1)
         segments = [x for x in raw['segments'] if not x['text'].lstrip().startswith(('【提问】', '> 长文章'))]
         if not segments:
@@ -306,7 +437,16 @@ class Retriever:
         attribution = '原文上下文；文档发布者不等于本段说话人。'
         author = d['_extra'].get('作者') or None
         qa_answers = [s for s in self.searcher.doc_segments[d['doc_id']] if '【回答】大卫翁' in s['text']]
-        if d['source'] == 'book':
+        if d['source'] == 'reference':
+            metadata = d['_reference']
+            author = metadata['provenance']['author']
+            # Quoted material cannot inherit the parent's author or turn labels.
+            speaker = bounded_text(hit.get('speaker'), 160) if metadata['quality']['reviewed'] else None
+            if speaker == '大卫翁':
+                speaker = None
+            kind = 'reference_image' if metadata['provenance']['referenceKind'] == 'image_ocr' else 'reference_article'
+            attribution = f"星主引用的关联资料；原作者：{author or '未确认'}；父文档：{metadata['provenance']['parentDocId']}。分享或引用不证明星主赞同。"
+        elif d['source'] == 'book':
             author, speaker = '大卫翁', '大卫翁'
             attribution = '大卫翁书面论述；段内引用他人观点时仍须按原文分别归属。'
         elif qa_answers and hit['n'] >= qa_answers[0]['n']:
@@ -339,21 +479,31 @@ class Retriever:
                     attribution = '单口转写开场自报大卫翁；转写可能有同音字，段内引述需另行归属。'
                 else:
                     attribution = '节目或资料中讨论；本段具体说话人未可靠确认，不整体归因给发布者。'
-        kind = {'book': 'book', 'wx': 'article', 'transcript': 'podcast'}.get(d['source'], 'qa' if qa_answers else 'podcast')
+        if d['source'] != 'reference':
+            kind = 'podcast' if official_text(d) else {'book': 'book', 'wx': 'article', 'transcript': 'podcast'}.get(d['source'], 'qa' if qa_answers else 'podcast')
         limits = ['仅本次检索到的原文节选，不代表作者全部或当前立场。']
         if not d.get('published_at'):
             limits.append('本地库未记录发布日期。')
-        if d['source'] == 'transcript':
+        if official_text(d):
+            limits.append('星球正式文字稿；段内引用和说话人仍须分别核对。')
+        elif d['source'] == 'transcript':
             limits.append('ASR转写可能存在同音字和断句错误。')
         if d['source'] == 'zsxq':
             limits.append('原链接可能需要会员权限；完整正文不随代码公开。')
         if speaker is None:
             limits.append('不能根据发布者元数据断定具体发言人。')
+        if d['source'] == 'reference':
+            limits.append('关联资料须结合父帖原文核对，不作为大卫翁本人观点。')
+            if metadata['provenance']['referenceKind'] == 'image_ocr':
+                limits.append('图片OCR识别文本；' + ('已核对原图。' if metadata['quality']['reviewed'] else '未经原图核对，文字、数字及图表关系可能有识别误差。'))
+            if not metadata['quality']['complete']:
+                limits.append('本地提取正文不完整。')
         anchor = '；'.join(f"{s['anchor'] or '段落'}（{s['segmentId']}）" for s in segments)
         return {'id': sid, 'title': d['title'], 'date': d.get('published_at'), 'kind': kind,
                 'docId': d['doc_id'], 'anchor': anchor, 'author': author, 'speaker': speaker,
                 'attribution': attribution, 'summary': text, 'text': text, 'publicUrl': d.get('url'),
-                'evidenceLimitations': ''.join(limits)}
+                'evidenceLimitations': ''.join(limits),
+                **(metadata if d['source'] == 'reference' else edition_metadata(d['_extra']))}
 
 
 def main():
