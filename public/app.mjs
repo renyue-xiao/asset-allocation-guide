@@ -1,6 +1,6 @@
-import { calculateAllocation, DEFAULT_STRESS } from "/lib/allocation.mjs";
-import { SAMPLE_CASES } from "/lib/samples.mjs";
-import { compareRebalance } from "/lib/discipline.mjs";
+import { calculateAllocation, DEFAULT_STRESS } from "./lib/allocation.mjs";
+import { SAMPLE_CASES } from "./lib/samples.mjs";
+import { compareRebalance } from "./lib/discipline.mjs";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) =>
@@ -674,18 +674,24 @@ async function ask(question, plan) {
   $("#chat-input").value = "";
   renderChat();
   try {
-    const response = await fetch("/api/ask", {
+    const response = await fetch("./api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, history, ...(plan ? { plan } : {}) }),
       signal: AbortSignal.timeout(70000),
     });
-    if (!response.ok)
-      throw Error(
-        response.status === 429
-          ? "问题较多，请稍后再试。"
-          : "资料助手暂时无法连接，请稍后重试。",
-      );
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      const message =
+        response.status === 401
+          ? "网站登录已过期，请刷新页面重新登录。"
+          : typeof failure.error === "string" && failure.error.length <= 180
+            ? failure.error
+            : response.status === 429
+              ? "问题较多，请稍后再试。"
+              : "资料助手暂时无法连接，请稍后重试。";
+      throw Error(message);
+    }
     const data = await response.json();
     for (const s of data.sources)
       if (!state.sources.some((x) => x.id === s.id)) state.sources.push(s);
@@ -800,7 +806,7 @@ $("#clear-chat").addEventListener("click", () => {
 });
 renderStep();
 try {
-  const response = await fetch("/api/bootstrap");
+  const response = await fetch("./api/bootstrap");
   if (!response.ok) throw Error();
   const data = await response.json();
   state.sources = [];
