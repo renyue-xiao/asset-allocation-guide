@@ -130,6 +130,14 @@ test("publication author stays in citation information when segment speaker is u
   assert.equal(result.sources[0].author, "记者甲");
   assert.equal(result.sources[0].publicationAuthor, "记者甲");
   assert.doesNotMatch(result.sections[0].label, /记者甲/);
+  let received;
+  const modelResult = await createResearchAssistant({ sources: [article], provider: provider(async ({input}) => {
+    received = input;
+    return { sections: [{ label: "来源观点", text: "资料说明应急资金应结合家庭收支安排。", sourceIds: [article.id], evidence: [{ sourceId: article.id, quote: "应急资金应结合家庭收支安排。" }] }], limitations: [] };
+  }) }).ask({ question: "应急资金怎么安排？" });
+  assert.equal(modelResult.mode, "model");
+  assert.equal(modelResult.sections[0].label, "来源观点 · 该段资料（归属未确认）");
+  assert.equal(received.evidence[0].kind, "reference_article");
 });
 
 test("source relations and official transcript edition fields survive cards and evidence", async () => {
