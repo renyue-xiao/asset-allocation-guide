@@ -126,6 +126,51 @@ with tempfile.TemporaryDirectory() as temp:
   assert.equal(execFileSync(process.env.QIZHULOU_PYTHON || process.env.PYTHON || "python3", ["-c", program, scriptPath], { encoding: "utf8", timeout: 10000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } }).trim(), "ok");
 });
 
+test("explicit titles route only to eligible named bodies and support collection and episode titles", () => {
+  const scriptPath = fileURLToPath(new URL("../scripts/retrieve.py", import.meta.url));
+  const program = String.raw`
+import importlib.util,json,sqlite3,tempfile,pathlib,sys
+spec=importlib.util.spec_from_file_location('retrieval',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+with tempfile.TemporaryDirectory() as temp:
+ db=pathlib.Path(temp)/'test.sqlite';c=sqlite3.connect(db)
+ c.executescript('CREATE TABLE docs(doc_id TEXT,source TEXT,title TEXT,published_at TEXT,url TEXT,extra TEXT);CREATE TABLE segments(seg_id TEXT,doc_id TEXT,n INTEGER,text TEXT,anchor TEXT,speaker TEXT,start_ms INTEGER);')
+ valid={'corpus':'qizhulou','parentDocId':'zs-parent','parentAuthor':'大卫翁','referenceKind':'linked_article','author':'合成作者','quality':{'complete':True,'reviewed':True}}
+ docs=[('zs-parent','zsxq','合成星主引用说明',{'作者':'大卫翁'}),('ref-title','reference','封面报道之二｜合成金融史回望研究',valid),('ref-ocr','reference','合成图表中的储备比例',{**valid,'referenceKind':'image_ocr','quality':{'complete':True,'reviewed':False}}),('ref-part','reference','合成金融制度演变专论',{**valid,'quality':{'complete':False,'reviewed':True}}),('zs-official','zsxq','【文字稿】184.合成全球投资行为纪实（正式文字稿）',{'作者':'大卫翁','contentRole':'transcript','edition':'official_text','episodeDocId':'ep-184'}),('book-synthetic','book','第一章·合成家庭底账',{})]
+ bodies={'ref-title':['合成作者回顾了央行制度的历史变化，指出每一种历史评价都应结合当时制度约束和事件背景，不能脱离正文语境。','货币政策需要根据历史制度和具体事件分析，合成作者在此段讨论政策工具的使用边界及公众理解差异。'],'zs-official':['本期正式文字稿记录嘉宾对于全球投资行为的讨论，需要区分观察与预测，以及每种说法的具体条件。'],'book-synthetic':['家庭底账需要分别记录资产、负债和现金流，按照实际用款日期核对资金用途，再比较长期资产安排。']}
+ for did,source,title,extra in docs:
+  c.execute('INSERT INTO docs VALUES(?,?,?,?,?,?)',(did,source,title,None,None,json.dumps(extra)))
+  for n,text in enumerate(bodies.get(did,['应急资金需要按照真实支出与用款期限分别记录，合成资料仅用于验证引用范围和提取质量。']),1):c.execute('INSERT INTO segments VALUES(?,?,?,?,?,?,?)',(did+':'+str(n),did,n,text,'第'+str(n)+'段',None,None))
+ c.commit();c.close();r=m.Retriever(temp,str(db),'keyword')
+ class Stub:
+  def __init__(self):
+   self.doc_segments={did:[dict(x) for x in r.conn.execute('SELECT * FROM segments WHERE doc_id=? ORDER BY n',(did,))] for did in r.docs}
+   self.seg_refs=[x for segs in self.doc_segments.values() for x in segs]
+   self.bm25=self
+  def get_scores(self,words):return [20 if '货币政策' in x['text'] else 1 for x in self.seg_refs]
+  def get_context(self,sid,radius=1):
+   did,n=sid.rsplit(':',1)
+   return {'segments':[{'segmentId':x['seg_id'],'text':x['text'],'anchor':x['anchor'],'isMatch':x['n']==int(n)} for x in self.doc_segments[did] if abs(x['n']-int(n))<=radius]}
+ r.searcher=Stub();r.rows={x['seg_id']:x for x in r.searcher.seg_refs};r.eligible_indices=list(range(len(r.searcher.seg_refs)));r.eligible_texts={sid:x['text'] for sid,x in r.rows.items()};r.initialize=lambda:None;r.tokenize=lambda q:[w for w in ['养老金','货币政策'] if w in q];r.coverage={'vectorAvailable':False}
+ def no_guides(*_):raise AssertionError('explicit title used unrelated guides')
+ r.guided=no_guides
+ for q in ['请归纳《合成金融史回望研究》主要观点','合成金融史回望研究的货币政策观点是什么？','请归纳财新《合成金融史回望研究》的主要观点，并说明与大卫翁推荐阅读的关系']:
+  result=r.search(q);assert [x['docId'] for x in result['sources']]==['ref-title'] and result['retrieval']['scope']=='named-document'
+  assert '央行制度' in result['sources'][0]['text'] or '货币政策' in result['sources'][0]['text']
+ specific=r.search('《合成金融史回望研究》的货币政策观点是什么？');assert specific['sources'][0]['id']=='ref-title:2' and specific['sources'][0]['speaker'] is None
+ assert r.search('《合成金融史回望研究》怎样讨论养老金？')['sources']==[]
+ assert '宏观金融研究专栏' not in m.title_aliases({'title':'宏观金融研究专栏｜合成政策评估研究','_extra':{},'doc_id':'wx-column','source':'wx'})
+ for q in ['《合成图表中的储备比例》应急资金怎样安排？','《合成金融制度演变专论》主要观点','《完全不存在的虚构研究》应急资金怎么安排？','《投资》应急资金怎么安排？','《封面报道之二》主要观点']:
+  result=r.search(q);assert result['sources']==[] and result['retrieval']['scope']=='named-document'
+ for q in ['请归纳《第184期合成全球投资行为纪实》主要内容','《合成全球投资行为纪实》主要观点']:
+  result=r.search(q);assert [x['docId'] for x in result['sources']]==['zs-official'] and result['sources'][0]['edition']=='official_text'
+ result=r.search('《资产配置行动指南》的主要观点');assert [x['docId'] for x in result['sources']]==['book-synthetic']
+ r.docs['ref-same-book']={'doc_id':'ref-same-book','title':'资产配置行动指南','source':'reference','_extra':valid}
+ requested,targets,_=r.title_targets('请概括资产配置行动指南的主要观点');assert requested and targets=={'book-synthetic'}
+ print('ok')
+`;
+  assert.equal(execFileSync(process.env.QIZHULOU_PYTHON || process.env.PYTHON || "python3", ["-c", program, scriptPath], { encoding: "utf8", timeout: 10000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } }).trim(), "ok");
+});
+
 test("missing corpus is explicit and does not start a model or download", async () => {
   const retriever = createRetriever({ root: "", db: "" });
   assert.equal(retriever.status().configured, false);

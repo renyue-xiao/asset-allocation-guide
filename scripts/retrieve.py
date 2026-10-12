@@ -159,6 +159,29 @@ def reference_answer_eligible(doc):
             and (metadata['provenance']['referenceKind'] != 'image_ocr' or metadata['quality']['reviewed']))
 
 
+def title_key(value):
+    return re.sub(r'[^a-z0-9\u4e00-\u9fff]', '', value.casefold())
+
+
+def title_aliases(doc):
+    title = doc['title']
+    title = re.sub(r'^【[^】]*(?:文字稿|转写)[^】]*】\s*', '', title)
+    title = re.sub(r'[（(【]?(?:正式|官方)?(?:文字稿|逐字稿|文字版|全文)[）)】]?$', '', title).strip()
+    parts = [title, *re.split(r'[|｜]', title), *re.findall(r'《([^》]+)》', title)]
+    aliases = {title_key(part) for part in parts if part.strip()
+               and not re.fullmatch(r'封面报道(?:之[一二三四五六七八九十0-9]+)?', title_key(part))
+               and not title_key(part).endswith(('专栏', '栏目'))}
+    episode = episode_key(doc)
+    if episode and re.fullmatch(r'ep-\d+', episode):
+        number = episode[3:]
+        aliases.add('第' + number + '期')
+        for alias in list(aliases):
+            core = re.sub(r'^(?:第)?' + number + r'(?:期)?', '', alias)
+            if len(core) >= 8:
+                aliases.update({core, '第' + number + '期' + core})
+    return aliases
+
+
 def select_docs(conn):
     """Same corpus=qizhulou predicate as the existing MCP server."""
     docs, references = {}, []
@@ -323,6 +346,75 @@ class Retriever:
         scored.sort(reverse=True)
         return [sid for score, sid in scored[:3]]
 
+    def title_targets(self, question):
+        quoted = [title_key(value) for value in re.findall(r'[《〈]([^》〉]+)[》〉]', question)]
+        normalized = title_key(question)
+        targets, matched = set(), set()
+        for did, doc in self.docs.items():
+            aliases = title_aliases(doc)
+            if quoted:
+                hits = {title for title in quoted if (len(title) >= 6 or re.fullmatch(r'第\d{1,3}期', title)) and title in aliases}
+            else:
+                hits = {alias for alias in aliases if len(alias) >= 8 and alias in normalized}
+            if '资产配置行动指南' in normalized:
+                if doc['source'] == 'book':
+                    hits.add('资产配置行动指南')
+                else:
+                    hits.discard('资产配置行动指南')
+            if hits:
+                targets.add(did)
+                matched.update(hits)
+        return bool(quoted or targets), targets, matched
+
+    def search_title(self, question, targets, matched, started):
+        eligible_docs = {did for did in targets if reference_answer_eligible(self.docs[did])
+                         and self.docs[did]['source'] != 'episode' and not did.startswith('bookref-')}
+        status = {'mode': 'title-keyword', 'scope': 'named-document',
+                  'targetDocIds': sorted(eligible_docs), 'coverage': self.coverage}
+        if not eligible_docs:
+            return {'sources': [], 'retrieval': {**status, 'warning': '本地未定位到点名资料的可用正文，请核对完整标题与资料质量。'}}
+        self.initialize()
+        residual = title_key(re.sub(r'[《〈][^》〉]+[》〉]', '', question))
+        for alias in sorted(matched, key=len, reverse=True):
+            residual = residual.replace(alias, '')
+        residual = STOP.sub(' ', residual)
+        residual = re.sub(r'正式文字稿|文字稿|阅读|归属|查阅|解释|大卫翁|请|归纳|概括|总结|主要观点|核心观点|主要内容|正文|文章|书中|财新|推荐|引用|有什么关系|关系|观点|说明|介绍|讲了什么|有什么|如何|怎样|怎么', ' ', residual)
+        words = [word for word in self.tokenize(residual) if len(word) > 1]
+        scores = self.searcher.bm25.get_scores(words) if words else None
+        candidates = []
+        for index in self.eligible_indices:
+            segment = self.searcher.seg_refs[index]
+            did = segment['doc_id']
+            sid = f"{did}:{segment['n']}"
+            if did not in eligible_docs or sid not in self.eligible_texts:
+                continue
+            if words and not any(word in segment['text'] for word in words):
+                continue
+            candidates.append((float(scores[index]) if words else 0, segment['n'], sid))
+        candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+        named = set(SPEAKERS.findall(question)) - {'大卫翁'}
+        qualified = []
+        for _, _, sid in candidates:
+            source = self.context(sid, question)
+            if source and (not named or source['speaker'] in named):
+                qualified.append((sid, source))
+        official = {episode_key(self.docs[self.rows[sid]['doc_id']]) for sid, _ in qualified
+                    if official_text(self.docs[self.rows[sid]['doc_id']])}
+        official.discard(None)
+        sources, seen = [], set()
+        for sid, source in qualified:
+            did = self.rows[sid]['doc_id']
+            if did in seen or (self.docs[did]['source'] == 'transcript' and not official_text(self.docs[did])
+                               and episode_key(self.docs[did]) in official):
+                continue
+            sources.append(source)
+            seen.add(did)
+            if len(sources) == 4:
+                break
+        warning = None if sources else '点名资料正文未检出与本次问题相关的合格片段，不能用其他资料代替。'
+        return {'sources': sources, 'retrieval': {**status, 'coverage': self.coverage, 'warning': warning,
+                'elapsedMs': round((time.perf_counter() - started) * 1000)}}
+
     def search(self, question, mode=None):
         started = time.perf_counter()
         mode = mode or self.mode
@@ -330,6 +422,9 @@ class Retriever:
         groups = [item for item in TOPICS if re.search(item[0], question)]
         if LIVE.search(question):
             return {'sources': [], 'retrieval': {'mode': 'none', 'warning': '本地资料不能核验实时持仓、行情或新的市场预测。', 'coverage': self.coverage}}
+        requested, targets, matched = self.title_targets(question)
+        if requested:
+            return self.search_title(question, targets, matched, started)
         if not groups and re.search(r'钱|财|收入|资金|基金|股票|账户|存款|银行|投资|还债|资产|收益|产品|本金|利率', question):
             groups = [(r'.', '', r'钱|财|收入|资金|基金|股票|账户|存款|银行|投资|还债|资产|收益|产品|本金|利率')]
         if not groups:

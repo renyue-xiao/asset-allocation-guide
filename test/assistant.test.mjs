@@ -130,6 +130,14 @@ test("publication author stays in citation information when segment speaker is u
   assert.equal(result.sources[0].author, "记者甲");
   assert.equal(result.sources[0].publicationAuthor, "记者甲");
   assert.doesNotMatch(result.sections[0].label, /记者甲/);
+  let received;
+  const modelResult = await createResearchAssistant({ sources: [article], provider: provider(async ({input}) => {
+    received = input;
+    return { sections: [{ label: "来源观点", text: "资料说明应急资金应结合家庭收支安排。", sourceIds: [article.id], evidence: [{ sourceId: article.id, quote: "应急资金应结合家庭收支安排。" }] }], limitations: [] };
+  }) }).ask({ question: "应急资金怎么安排？" });
+  assert.equal(modelResult.mode, "model");
+  assert.equal(modelResult.sections[0].label, "来源观点 · 该段资料（归属未确认）");
+  assert.equal(received.evidence[0].kind, "reference_article");
 });
 
 test("source relations and official transcript edition fields survive cards and evidence", async () => {
@@ -144,6 +152,21 @@ test("source relations and official transcript edition fields survive cards and 
   assert.equal(received.evidence.find((item) => item.sourceId===article.id).provenance.sourceRelations.length, 2);
   assert.equal(received.evidence.find((item) => item.sourceId==="cash").edition, "official_text");
   assert.equal(result.sources.find((item) => item.id==="cash").episodePublishedAt, "2026-01-01");
+});
+
+test("named documents with no supported body do not fall back to unrelated curated notes", async () => {
+  for (const retriever of [
+    { search: async () => ({ sources: [], retrieval: { scope: "named-document", warning: "没有找到点名资料正文。" } }) },
+    { search: async () => { throw Error("synthetic transport failure"); } },
+  ]) {
+    let calls = 0;
+    const result = await createResearchAssistant({ sources, retriever, provider: provider(async () => { calls++; return validSelection; }) }).ask({ question: "《合成但不存在的研究标题》应急资金怎么安排？" });
+    assert.equal(result.mode, "insufficient");
+    assert.deepEqual(result.sources, []);
+    assert.equal(calls, 0);
+    assert.match(result.answer, /点名资料/);
+    assert.ok(result.limitations.every((item) => !item.includes("本次使用已整理来源")));
+  }
 });
 const validSelection = {
   sections: [
